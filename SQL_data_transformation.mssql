@@ -1,0 +1,350 @@
+--Combined Shot Action versus Action type
+/****** Script for SelectTopNRows command from SSMS  ******/
+SELECT  [action_type],combined_shot_type, left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Shot_Percentage,
+count(*) Frequency
+into #ActionType
+  FROM [Stats].[dbo].[Final Data]
+  group by action_type, combined_shot_type
+  order by combined_shot_type, count(*)
+
+  SELECT   combined_shot_type, left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Shot_Percentage,
+count(*) Frequency
+Into #combinedShot
+  FROM [Stats].[dbo].[Final Data]
+  group by  combined_shot_type
+  order by combined_shot_type, count(*)
+
+
+  select [action_type], a.Frequency, a.Shot_Percentage, b.combined_shot_type, b.Frequency,b.Shot_Percentage
+  from #ActionType a inner join #combinedShot b
+  on a.combined_shot_type = b.combined_shot_type
+  where a.Frequency > 20
+  order by b.combined_shot_type
+
+  --- Shot zone basic, shot zone area comparison
+    Declare @total decimal(26,2)
+  select @total = Count(*)
+  from dbo.[Final Data]
+  
+  select shot_zone_basic, shot_zone_area, count(*) Frequency, 
+  cast(((count(*) / @total)) as decimal(26,2)) Distribution
+  from dbo.[Final Data]
+  group by shot_zone_basic, shot_zone_area
+  order by shot_zone_area
+
+Declare @total decimal(26,2)
+  select @total = Count(*)
+  from dbo.[Final Data]
+  
+  select   shot_zone_area, count(*) Frequency, 
+  cast(((count(*) / @total)) as decimal(26,2)) Distribution
+  from dbo.[Final Data]
+  group by   shot_zone_area
+  order by shot_zone_area
+
+  SELECT shot_zone_area, left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Shot_Percentage, left(cast(count(*) as decimal(26,2)) / 30697.00 ,4) as Distribution
+  FROM [Stats].[dbo].[Final Data]
+  --where shot_made_flag <> ''
+  group by shot_zone_area
+
+----TRANSFORMATION__________________________________________________________________________________
+--Update DateID, used for sorting yyymmdd
+update stats.dbo.[Final Data]
+set [DateID] = cast(convert(varchar(20),cast(game_date as date), 112) as int)
+
+
+--- Update Game Half -- 
+
+update stats.dbo.[Final Data]
+SET Game_Half = CASE WHEN period < 3 THEN '1st' WHEN period > 4 THEN 'OT' ELSE '2nd' END 
+
+
+  --Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, Game_Half,timeremaining,
+count(*) Frequency
+FROM [dbo].[Final Data]
+where shot_made_flag <> '' and game_half = '2nd' and TimeRemaining < 200
+group by GAME_HALF, TimeRemaining
+order by TimeRemaining desc
+
+
+
+---Update GameNumber Helps order the records and order variable works well in models----------------------------
+select   season,dateID,
+rank() over (partition by season order by DateID) GameNumber
+into #gameNumber
+from stats.dbo.[Final Data]
+group by season, dateID
+
+update b
+set GameNumber = a.GameNumber
+from #gameNumber a inner join stats.dbo.[Final Data] b
+on a.DateID = b.DateID
+
+  --Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, GameNumber, count(GameNumber)
+FROM [dbo].[Final Data]
+where shot_made_flag <> ''
+group by GameNumber
+order by left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) desc
+
+
+  --Update Time Remaining -- Combining Minutes and Seconds
+  UPDATE  [Stats].[dbo].[Final Data]
+  Set [TimeRemaining]  = (Cast(minutes_remaining as int) * 60) + seconds_remaining
+
+    --Update Rival -- Rollup of Opponents
+  SELECT case when count(*) < 1000 then 0 else 1 end RivalYesNo, opponent
+  Into #Opponents
+  FROM [Stats].[dbo].[Final Data]
+  group by opponent
+  order by count(*) desc
+
+  update a
+   set Rival = RivalYesNo
+  from stats.dbo.[Final Data] a inner join #Opponents b
+  on a.Opponent = b.opponent
+
+  --Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, Rival
+FROM [dbo].[Final Data]
+where shot_made_flag <> '' 
+group by Rival
+
+
+
+--- Update the OffDays ------------------------------------------------------
+--  First set up a table to connect previous game
+Select distinct GameNumber, DateID, season
+into #Games
+From stats.dbo.[Final Data]
+
+with recur as (
+SELECT  GameNumber, DateID, PreviousDateID = DateID, season
+FROM #games
+WHERE GameNumber = 1
+union all
+SELECT  b.GameNumber, b.DateID,   a.DateID, b.season
+FROM recur a inner join #games b
+ON a.season = b.season and a.GameNumber = b.GameNumber - 1
+WHERE b.GameNumber < 106  --to speed up
+)
+ 
+Select distinct * 
+into #DayOff
+from recur option (maxrecursion 0)
+--Now start updating... All except the First game of the year
+	Update a
+	set offDays =   datediff(d,cast(cast(b.previousdateid as varchar(50)) as date),cast(cast(b.dateid as varchar(50))as date)) 
+	from stats.dbo.[Final Data] a  inner join #DayOff b
+		on a.dateid = b.dateid
+	where game_id <> 1
+
+--To update the first game we need to know what the last game of previous season was
+	select max(gameNumber) gameID, season 
+	into #LastGame
+	from stats.dbo.[Final Data]
+	group by season
+	order by season
+
+--Store the date differences in temp table before we update
+	select distinct  datediff(d,a.game_date, c.game_date)DaysOff, c.gamenumber,  c.season 
+	into #GameOne
+	from stats.dbo.[Final Data] a
+	inner join #LastGame b on a.gameNumber = b.gameID and a.season = b.season
+	inner join stats.dbo.[Final Data] c
+		on year(a.game_date) = year(c.game_date)
+		and c.gameNumber = 1
+	where a.season not in ( '1998-99','2013-14','2014-15') --These years are unique.. Kobe was injured and 1998 season stared late
+
+	update a
+	set OffDays = b.DaysOff
+	from stats.dbo.[Final Data] a
+	inner join #GameOne b on a.season = b.season and a.gameNumber = 1
+
+-- Now we need to look at the unique years, one at a time
+-- Get the last game played from previous season
+	SELECT max(gamenumber)gm, season
+	INTO #lastUnique
+	FROM stats.dbo.[Final Data]
+	WHERE season in ('1997-98','2013-14','2014-15')
+	group by season
+
+-- Get the date of the last game played previous season
+	select distinct game_date, a.season
+	from stats.dbo.[Final Data] a
+	inner join #lastUnique b
+	on a.gamenumber = b.gm and a.season = b.season
+
+--'1999-00'
+	select DATEDIFF(d,'5/23/1999','12/1/1999')
+	update   stats.dbo.[Final Data] 
+	set OffDays = 192
+	where season = '1999-00' and gamenumber = 1
+
+	--'1998-99'
+	select datediff(d,'5/24/1998',game_date), offdays, game_date
+	from stats.dbo.[Final Data]
+	where gamenumber = 1 and season = '1998-99'
+
+	update stats.dbo.[Final Data]
+	set offdays = 257
+	where gamenumber = 1 and season = '1998-99'
+
+	-- '2014-15'
+	select DATEDIFF(d,'12/17/2013','10/28/2014')
+
+	update stats.dbo.[Final Data]
+	set OffDays = 315
+	where season = '2014-15' and gamenumber = 1
+
+	select DATEDIFF(d,'1/21/2015','10/28/2015')
+	update stats.dbo.[Final Data]
+	set offdays = 280
+	where season = '2015-16' and gamenumber = 1
+
+
+	-- Kobe's first year assume high school season ends in March
+	select datediff(d,'4/1/1996','11/3/1996')
+	update stats.dbo.[Final Data]
+	set offdays = 216
+	where season = '1996-97' and gamenumber = 1
+
+
+-- Update Rest
+update stats.dbo.[Final Data]
+set Rest = case when OffDays = 2 then 'Avg'
+				when OffDays < 2 then 'Below'
+				when OffDays between 3 and 7 then 'Above'
+				when OffDays  > 6 then 'Ext'
+				end
+
+
+  --Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, REST,season
+FROM [dbo].[Final Data]
+where shot_made_flag <> ''
+group by Rest, season
+order by season
+
+  --Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, 
+count(*) Frequency, Game_Half, REST
+FROM [dbo].[Final Data]
+where shot_made_flag <> ''
+group by GAME_HALF,REST
+order by left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) desc
+
+-------------------------------------------------------------------------------------------
+
+--- NEW DATA
+
+---------------------------------------------------------------------------------------------------
+
+
+-- win_loss
+UPDATE b
+SET [win_loss] = [Column 7]
+FROM [dbo].[LakerGameHistory] a
+inner join [dbo].[Final Data] b
+	on cast(a.Date as date) = cast(b.game_date as date)
+
+--Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, win_loss 
+FROM [dbo].[Final Data]
+where shot_made_flag <> ''
+group by win_loss 
+
+  --Update Previous game Win/loss 
+ Update a
+set PreviousWinLoss = c.win_loss
+from stats.dbo.[Final Data] a  inner join #DayOff b
+	on a.dateid = b.dateid
+inner join stats.dbo.[Final Data] c
+	on c.dateID = b.previousdateid
+
+
+-- Look at the data
+select  left(round(cast(sum(cast(shot_made_flag as int)) as decimal(26,2)) / count(shot_made_flag),2),4) Percentage, previouswinloss 
+FROM [dbo].[Final Data]
+where shot_made_flag <> ''
+group by previouswinloss 
+
+
+----HOW ABOUT SOME OF KOBE'S STATS
+--  AVERAGE --FGA,   PTS 
+
+select rank() over (order by Season) SeasonNumber, season
+Into #CareerGameNumber
+from dbo.[Final Data]
+group by season
+
+
+SELECT a.season, c.SeasonNumber, cast(d.pts as decimal(26,2)) pts, cast(d.[FG%] as decimal(26,2))   ShotPct
+Into #Averages
+FROM DBO.[Final Data] a
+	INNER JOIN #CareerGameNumber C
+		ON A.season = c.season
+	inner join #CareerGameNumber CC
+		on cc.SeasonNumber = c.SeasonNumber-1
+	INNER JOIN dbo.KobeCareer d
+		on cc.season = d.Season
+group by  a.season, c.SeasonNumber, d.pts, d.[FG%], d.[3P%]
+
+
+ 
+update a
+set seasonNumber = b.SeasonNumber, PrevSeasonGamePPG = b.pts,
+LastSeasonShotPct = b.ShotPct 
+from dbo.[Final Data] a
+inner join #Averages b
+	on b.season = a.season
+
+update dbo.[Final Data] 
+Set SeasonNumber = 1
+where seasonnumber is  null
+ 
+-- First season is getting the actual percent
+ Declare @LastSeason decimal(26,2)
+ Declare @LastSeasonPointPPG  decimal(26,2)
+ select @LastSeason= avg(LastSeasonShotPct) from dbo.[Final Data] where LastSeasonShotPct is not null
+ select @LastSeasonPointPPG = avg([PrevSeasonGamePPG]) from dbo.[Final Data] where [PrevSeasonGamePPG] is not null
+
+ update dbo.[Final Data]
+ set [PrevSeasonGamePPG]=@LastSeasonPointPPG, LastSeasonShotPct=@LastSeason
+ where seasonNumber = 1
+
+--- Cummulative totals against career
+select   cast(sum(cast(b.shot_made_flag as int)) as decimal(26,2)) / cast(count(b.shot_made_flag) as decimal(26,2)) CummPercent,  a.gameNumber, a.seasonNumber, 
+a.shot_id,  count(b.shot_made_flag) CumShots
+Into #CumShots
+from dbo.[Final Data] a
+	inner join dbo.[Final Data]b 
+		on a.season = b.season
+		and a.GameNumber = b.gameNumber
+		and b.shot_id < a.shot_id
+where a.shot_id <> ''
+and b.shot_id <> ''
+group by a.shot_id, a.gameNumber, a.seasonNumber
+order by a.seasonNumber, a.gameNumber, a.shot_ID
+
+
+Update a
+set [GameCumPts] = b.CumShots, [GameCumPct] = b.CummPercent
+from dbo.[Final Data] a
+inner join #CumShots b
+on a.shot_id = b.shot_id
+
+select min(shot_id) ShotID, season, GameNumber 
+into #FirstShot
+from dbo.[Final Data]
+group  by season, GameNumber 
+Update a
+set [GameCumPts] = 0, [GameCumPct]=0
+from dbo.[Final Data] a inner join #FirstShot b
+on a.shot_id = b.ShotID
+
+Update   dbo.[Final Data]
+set AboveAvg =  case when (gamecumpct * 100)< [LastSeasonShotPct] then 0 else 1 end 
+
+
